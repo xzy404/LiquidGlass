@@ -1,0 +1,7 @@
+{
+  "name": "cf-sidebar-nav",
+  "version": "1.0.0",
+  "description": "CatchFish OJ — 把 Hydro 原生顶栏搬到左侧栏（方案一/二/三，方案四为保留原样）",
+  "keywords": ["hydro-addon", "ui", "sidebar", "nav"],
+  "main": "index.ts"
+}

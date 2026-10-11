@@ -1,0 +1,633 @@
+/* ============================================================
+   方案三 v6 · 液态玻璃（参考 martin65536/liquid-glass-webgl 的视觉配方）
+   CatchFish OJ · Hydro v5.0.4 / @hydrooj/ui-default 4.58.4
+
+   v5 的做法本质还是「半透明白 + 模糊」，在彩色背景上会过曝 —— 白色层叠到
+   alpha .7 以上就成了"发白的磨砂板"，刺眼且不通透。
+   参考那个 WebGL 项目，它的液态玻璃靠四件事撑起来，缺一个就不像：
+     ① 极低的白底（.08~.12），玻璃本身几乎不遮 —— 这是"通透"的唯一来源
+     ② 强饱和 + 提亮（saturate 200% / brightness 1.06）把背景颜色顶出来
+     ③ 边缘光聚集：四边 inset 高光，玻璃边缘把光线聚拢
+     ④ 色差（chromatic aberration）：边缘极细的彩色描边，棱镜感
+   所以这一版把"多层白底渐变"整个删掉，改成单层极低 alpha + 边缘色散。
+
+   ⚠ 关于真折射：那个项目是 WebGL1 自绘渲染器 —— 玻璃元素和背景都画在它自己的
+     canvas 上，走 ping-pong FBO 做位移和色散。DOM 页面（文字/表格/表单）没法搬进
+     canvas，CSS 的 backdrop-filter 也只支持 blur/brightness/contrast/saturate，
+     不接受 SVG 位移滤镜。所以"背景被真正扭曲"在 DOM 里做不到，
+     这里用「极低底 + 强饱和 + 边缘光 + 色散」逼近，这是 CSS 范围内的上限。
+   ============================================================ */
+
+@media (min-width: 601px) {
+  :root {
+    --cf-w: 72px;
+    --cf-w-hover: 224px;
+    --cf-bar-h: 58px;
+    --cf-ease: cubic-bezier(.22, .61, .36, 1);
+
+    /* ---- 液态玻璃（v11：改由 WebGL 折射接管）----
+       现在玻璃的观感全部来自 /glass.js 的 shader：把站点壁纸当纹理，
+       做「边缘弯折 + 透镜 + 微量色散 + 雾化」。CSS 这里只负责两件事：
+         ① JS 没跑起来时的兜底外观（下面这两个变量）
+         ② 一个柔和投影，把玻璃从背景上"抬"起来
+       ⚠ 这一版**没有任何边缘高光**。上一版那几条 inset 白线是我拿
+         box-shadow 硬刷上去的，跟真玻璃没关系，也正是用户说的"很刺眼"。
+         现在边缘的亮完全来自折射本身。 */
+    --cf-glass: rgba(255, 255, 255, .46);
+    --cf-filter: blur(20px) saturate(150%);
+    --cf-shadow: 0 12px 40px -20px rgba(15, 23, 42, .28);
+  }
+
+  /* ---------- 原生 .nav：只当用户区定位容器 ---------- */
+  .nav.slideout-menu {
+    position: fixed !important;
+    top: 0; left: 0;
+    width: 1px; height: 1px;
+    z-index: 504;
+    background: none !important;
+    box-shadow: none !important;
+    pointer-events: none;
+    display: block;
+    overflow: visible;
+  }
+  .nav > .row,
+  .nav > .row > .columns { margin: 0; padding: 0; border: 0; background: none; }
+  .nav__list--main { display: none !important; }
+
+  /* ================= 侧栏 ================= */
+  .cf-side {
+    position: fixed;
+    top: 0; bottom: 0; left: 0;
+    width: var(--cf-w);
+    z-index: 503;               /* 高于顶栏，盖住它向左扩散的投影 */
+    display: flex;
+    flex-direction: column;
+    background: var(--cf-glass);
+    -webkit-backdrop-filter: var(--cf-filter);
+    backdrop-filter: var(--cf-filter);
+    box-shadow: var(--cf-shadow);
+    transition: width .28s var(--cf-ease);
+  }
+  .cf-side:hover { width: var(--cf-w-hover); }
+
+  /* ================= 顶栏 ================= */
+  .cf-bar {
+    position: fixed;
+    top: 0; right: 0;
+    left: var(--cf-w);
+    height: var(--cf-bar-h);
+    z-index: 502;
+    display: flex;
+    align-items: center;
+    padding: 0 16px 0 13px;   /* 左 13 是给面包屑每段的 9px padding 让位，文字仍落在 22px */
+    background: var(--cf-glass);
+    -webkit-backdrop-filter: var(--cf-filter);
+    backdrop-filter: var(--cf-filter);
+    /* 这里原来有一条 `inset 0 -1px 0 rgba(255,255,255,.7)` ——
+       那就是用户看到的"顶栏底下有一条线"。它再加上 backdrop-filter
+       在底边的采样伪影，叠成一条很显眼的白线。现在两个都去掉了：
+       玻璃的边由 shader 画，CSS 不再自己描边。 */
+    box-shadow: none;
+    transition: left .28s var(--cf-ease);
+  }
+  .cf-side:hover ~ .cf-bar { left: var(--cf-w-hover); }
+  .cf-bar a { cursor: pointer; }
+  .cf-crumb, .cf-bar > * { position: relative; z-index: 1; }
+
+  /* 左内边距 13 + 面包屑每段自己的 9px = 文字仍在 22px 处 ——
+     给每段加左右 padding 是为了让 hover 的药丸有呼吸空间。 */
+  .cf-crumb {
+    display: flex; align-items: center; gap: 2px;
+    min-width: 0; flex: 1;
+    font-size: 14px; line-height: 1;
+  }
+  .cf-crumb__sep { color: #c6cfdb; user-select: none; margin: 0 3px; }
+  /* 面包屑的每一段都是一个可点的"药丸"（用户要求：顶栏要有鼠标移入的选中效果）：
+     原来只有 a:hover 变色，白色顶栏上几乎看不出来。
+
+     ⚠ 必须用**子选择器** `>`：下面的比赛 tab 也在 #cf-crumb 里面（它整组是一个"段"），
+       而 `.cf-crumb a` 的特异性是 (0,2,1)，比 `.cf-tab` 的 (0,1,0) 和
+       `.cf-tab:hover` 的 (0,2,0) 都高 —— 不加 `>` 的话 tab 会被面包屑的
+       padding 0 9px / border-radius 8px 覆盖掉，胶囊变方角。 */
+  .cf-crumb > a,
+  .cf-crumb > .cf-crumb__cur {
+    display: inline-flex; align-items: center;
+    height: 28px; padding: 0 9px;
+    border-radius: 8px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+  }
+  .cf-crumb > a { color: #5a6a7e; text-decoration: none; }
+  .cf-crumb > a:hover {
+    background: rgba(255, 255, 255, .68);
+    color: #0b3b8c;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+  }
+  .cf-crumb > a:active { background: rgba(11, 87, 201, .12); }
+  .cf-crumb > .cf-crumb__cur { color: #12283f; font-weight: 600; }
+
+  /* ---------- 比赛页的分段按钮（顶栏第二段） ----------
+     比赛列表 /  [比赛详情] [题目列表] [比赛成绩]
+     DOM 由 cf-nav.js 的 contestTabs() 生成（服务端注入顶栏时还不知道比赛 id）。 */
+  .cf-tabs { display: inline-flex; align-items: center; gap: 6px; }
+  .cf-tab {
+    display: inline-flex; align-items: center;
+    height: 28px; padding: 0 12px;
+    border-radius: 999px;
+    font-size: 13px; line-height: 1;
+    color: #2f4056; text-decoration: none; white-space: nowrap;
+    background: rgba(255, 255, 255, .46);
+    /* 描边用**深色发丝线**：本站底子是浅色玻璃，白描边等于没有 */
+    box-shadow: inset 0 0 0 1px rgba(47, 64, 86, .16);
+    transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+  }
+  .cf-tab:hover {
+    background: rgba(255, 255, 255, .80);
+    color: #0b3b8c;
+    box-shadow: inset 0 0 0 1px rgba(47, 64, 86, .26), 0 2px 6px -2px rgba(15, 23, 42, .22);
+  }
+  /* 当前所在的那个 tab。比 hover 更实，并且压过 hover ——
+     和侧栏 .cf-si--on 同一个思路：停在当前页上时高亮不能反而变淡。 */
+  .cf-tab--on,
+  .cf-tab--on:hover {
+    background: rgba(11, 87, 201, .16);
+    color: #0b57c9;
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px rgba(11, 87, 201, .32);
+  }
+
+  /* ================= 用户区（顶栏右侧） ================= */
+  .nav__list--secondary {
+    position: fixed !important;
+    top: 0; right: 16px;
+    width: auto !important;
+    height: var(--cf-bar-h);
+    z-index: 505;
+    pointer-events: auto;
+    float: none !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    gap: 2px;
+    margin: 0; padding: 0;
+    list-style: none;
+    background: none;
+    border-top: 0;
+  }
+  .nav__list--secondary .nav__list-item { float: none !important; width: auto; display: block; }
+  .nav__list--secondary .nav__item,
+  .nav__list--secondary .nav__item--round {
+    display: flex; align-items: center; gap: 8px;
+    height: 34px; margin: 0; padding: 0 12px;
+    border: 0; border-radius: 9px;
+    background: none;
+    color: #2f4056;
+    font-size: 14px; line-height: 1;
+    white-space: nowrap;
+    text-decoration: none;
+    box-shadow: none;
+    transition: background .18s ease, color .18s ease;
+  }
+  .nav__list--secondary .nav__item:visited,
+  .nav__list--secondary .nav__item--round:visited,
+  .nav__list--secondary .nav__item:active,
+  .nav__list--secondary .nav__item--round:active { background: none; color: #2f4056; }
+  /* 顶栏右侧用户区（登录 / 注册 / 用户名）的鼠标移入 ——
+     和面包屑、比赛 tab 用同一档药丸反馈，整条顶栏的 hover 手感统一 */
+  .nav__list--secondary .nav__item:hover,
+  .nav__list--secondary .nav__item--round:hover {
+    background: rgba(255, 255, 255, .68);
+    color: #0b3b8c;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+  }
+  .nav__list--secondary .nav__item:active,
+  .nav__list--secondary .nav__item--round:active { background: rgba(11, 87, 201, .12); }
+  .nav__list--secondary .cf-ic { flex: 0 0 18px; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; }
+  .nav__list--secondary .cf-ic svg { width: 18px; height: 18px; display: block; }
+  .nav__list--secondary .icon { width: 14px; height: 14px; font-size: 14px; }
+  .nav__list--secondary .user-profile-avatar { width: 18px; height: 18px; border-radius: 50%; }
+  /* 下拉菜单（用户菜单 / 语言 / 主题）原来完全没玻璃，是 Hydro 默认白底。
+     注意：Hydro 展开时会给菜单加 .nav__dropdown class（自带白底+边框+阴影），
+     所以不能只靠 .nav__list--secondary .menu 这种窄选择器 —— 换成
+     「id + Hydro 自己的 class」双重匹配，保证任何展开方式都命中。 */
+  .nav__dropdown,
+  #menu-nav-user,
+  #menu-footer-lang,
+  #menu-footer-theme,
+  .nav__list--secondary .menu,
+  .dropdown-target.menu {
+    z-index: 520 !important;
+    /* 浮层菜单要能读，所以比侧栏/卡片实一点；同样没有描边和高光。
+       不套 canvas —— 菜单随时开合，为它维护一张纹理不值得。 */
+    background: rgba(255, 255, 255, .58) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(150%) !important;
+    backdrop-filter: blur(20px) saturate(150%) !important;
+    border: 0 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 18px 44px -18px rgba(15, 23, 42, .40) !important;
+    overflow: hidden;
+  }
+  .nav__dropdown .menu__link,
+  .nav__dropdown .menu__item a,
+  #menu-nav-user .menu__link,
+  .nav__list--secondary .menu .menu__link { color: #2f4056 !important; }
+  .nav__dropdown .menu__link:hover,
+  .nav__dropdown .menu__item a:hover,
+  #menu-nav-user .menu__link:hover,
+  .nav__list--secondary .menu .menu__link:hover {
+    background: rgba(255, 255, 255, .5) !important;
+    color: #0b3b8c !important;
+  }
+  .nav__list--secondary .menu .menu__seperator { background: rgba(255, 255, 255, .3); }
+
+  /* ================= 侧栏品牌 / 导航 ================= */
+  .cf-side__brand {
+    display: flex; align-items: center;
+    flex: 0 0 auto;
+    height: var(--cf-bar-h);
+    padding: 0 23px;
+    text-decoration: none;
+  }
+  .cf-side__logo { display: block; flex: 0 0 26px; width: 26px; height: 26px; }
+  .cf-side__name {
+    max-width: 0; opacity: 0; margin-left: 0; overflow: hidden; white-space: nowrap;
+    font-size: 15px; font-weight: 700; letter-spacing: .2px;
+    color: #12304f;
+    transition: max-width .28s var(--cf-ease), opacity .16s ease, margin-left .28s var(--cf-ease);
+  }
+  .cf-side:hover .cf-side__name { max-width: 210px; opacity: 1; margin-left: 10px; }
+
+  .cf-side__nav {
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overflow-x: hidden;
+    padding: 4px 0;
+  }
+  .cf-si {
+    display: flex; align-items: center; gap: 12px;
+    height: 44px; margin: 2px 10px; padding: 0 16px;
+    border-radius: 10px;
+    color: #2f4056; font-size: 14px;
+    /* 底透明了，可读性靠这一层白色微光顶住 —— 不是加底色 */
+    text-shadow: 0 1px 2px rgba(255, 255, 255, .65), 0 0 6px rgba(255, 255, 255, .5);
+    text-decoration: none; white-space: nowrap; overflow: hidden;
+    box-shadow: none;
+    transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+  }
+  .cf-si:visited { color: #2f4056; }
+  /* 侧栏项的鼠标移入 / 当前页高亮。
+     ★ v20（2026-10-07 用户要求）：改成和顶栏面包屑**完全同一套「白色方框」**。
+       原来是「深色底 rgba(47,64,86,.17) + 左侧 3px 蓝色指示条」，用户不要那个蓝条了。
+
+     顶栏那套（本文件上面 `.cf-crumb > a:hover`）逐条对齐过来：
+       background: rgba(255,255,255,.68)  +  box-shadow: 0 1px 3px rgba(15,23,42,.12)  +  文字转蓝
+     当前页（--on）把白度抬到 .72 并加粗，好和"只是浮过一下"的项区分开。
+
+     ★ 顺序与特异性都不能动：
+       `.cf-si:hover` 是 (0,2,0)，比 `.cf-si--on` 的 (0,1,0) 高 ——
+       所有 hover 规则整段写在 --on 之前，并补一条 `.cf-si--on:hover`
+       把当前页的 hover 再抬一层，否则鼠标停**在当前页**上时高亮反而变淡。 */
+  .cf-si:hover {
+    background: rgba(255, 255, 255, .68);
+    color: #0b3b8c;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+  }
+  .cf-si:active {
+    background: rgba(255, 255, 255, .84);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .10);
+  }
+  .cf-si--on,
+  .cf-si--on:visited {
+    background: rgba(255, 255, 255, .72);
+    color: #0b57c9;
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .14);
+  }
+  .cf-si--on:hover {
+    background: rgba(255, 255, 255, .88);
+    color: #0b3b8c;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .14);
+  }
+  .cf-si__ic { flex: 0 0 20px; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; }
+  .cf-si__ic svg { width: 20px; height: 20px; display: block; }
+  .cf-si__tx {
+    max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap;
+    transition: max-width .28s var(--cf-ease), opacity .16s ease;
+  }
+  .cf-side:hover .cf-si__tx { max-width: 150px; opacity: 1; }
+
+  .cf-side__admin { flex: 0 0 auto; padding: 8px 0 10px; border-top: 1px solid rgba(47, 64, 86, .10); }
+  .cf-side__admin .cf-si { height: 38px; font-size: 13px; }
+  .cf-side__admin .cf-si__ic { flex-basis: 18px; width: 18px; height: 18px; }
+  .cf-side__admin .cf-si__ic svg { width: 18px; height: 18px; }
+  .cf-side__admin .cf-si__tx { max-width: 130px; }
+
+  /* ---------- 权限专属项（管理域 / 控制面板） ----------
+     服务端注入侧栏时拿不到用户身份（那个 server layer 只包响应体，不经过 handler），
+     所以这两项只带一个类名，由 /cf-nav.js 判定后给 <html> 加状态类：
+       · 管理域   → `cf-si--da` + `html.cf-da`（域内 PERM_EDIT_DOMAIN）
+       · 控制面板 → `cf-si--su` + `html.cf-su`（全站 PRIV_EDIT_SYSTEM）
+     ★ 默认一律 display:none —— 没有权限的用户**从头到尾看不到它们**，
+       不会出现"先闪一下再被 JS 收走"。代价是 JS 没跑起来时管理员也看不到，
+       但那种情况下整个侧栏交互都是坏的，不差这两项。 */
+  .cf-si--da,
+  .cf-si--su { display: none; }
+  html.cf-da .cf-si--da { display: flex; }
+  html.cf-su .cf-si--su { display: flex; }
+
+  /* ================= 页面卡片 =================
+     卡片 = 参考项目里的「懒加载容器」：一块会折射背景的玻璃板。
+     观感由 glass.js 的 canvas 提供（壁纸做纹理 → 透镜折射 + 边缘弯折 + vibrancy），
+     这里只留兜底外观和投影。**没有边框、没有顶部高光、没有色散描边** ——
+     用户上一版看到的就是这三样叠出来的"一层高光"。
+
+     圆角 20px 是 glass.js 直接从 CSS 读走的（KINDS 里 radius:'css'），
+     shader 的 SDF 和这里的圆角必须一致，改这里就等于改玻璃的形状。 */
+  .slideout-panel .section {
+    background: rgba(255, 255, 255, .50) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    backdrop-filter: blur(20px) saturate(150%);
+    border: 0 !important;
+    /* ⚠ 必须 !important：acrylic 插件自己也有一条
+       `.slideout-panel .main .section { border-radius: var(--acrylic-radius) }`，
+       它的 specificity (0,3,0) 比这里的 (0,2,0) 高，不加 !important 会被压回 14px
+       （上一版线上就是这样，CSS 明明写了 20px，computed 却是 14px）。 */
+    border-radius: 20px !important;
+    box-shadow: 0 16px 44px -26px rgba(15, 23, 42, .30) !important;
+  }
+  /* 正文不再靠白色微光顶对比度 —— 底色已经够实，加微光反而像发光 */
+  .slideout-panel .section .typo,
+  .slideout-panel .section .section__body,
+  .slideout-panel .section p,
+  .slideout-panel .section td,
+  .slideout-panel .section th { text-shadow: none; }
+
+  /* ---------- canvas 接管后（glass.js 给元素加的 .cf-glass） ---------- */
+  .cf-glass {
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border: 0 !important;
+    isolation: isolate;       /* 让画布的 z-index:-1 只在元素内部生效，不跑到页面底下 */
+    /* 投影照参考项目的 DEFAULT_SHADOW：radius 24 / alpha 0.1 / offsetY 4 / 黑。
+       参考是在 shader 里画高斯阴影，这里用 CSS box-shadow 等价替代。 */
+    box-shadow: 0 4px 24px rgba(0, 0, 0, .10) !important;
+  }
+
+  /* ★★ 真透明 ★★
+     玻璃内部**一个像素都不画**（glass.js 里的 hole），所以卡片区域要露出它背后的
+     真实页面 —— 前提是卡片自己的白底先摘掉。
+
+     ⚠ 这条特异性必须做到 (0,4,0)，因为要同时压过：
+        · 上面那条 `.slideout-panel .section { background: ... !important }`  (0,2,0)
+        · acrylic 插件的 `.slideout-panel .main .section { ... }`             (0,3,0)
+       两边都带 !important，只有特异性更高的才赢。
+
+     ⚠ 而且它挂在 `.cf-glass-on` 上 —— 这个类**只在画布真的挂上之后**才由
+     glass.js 加上。玻璃失败（没壁纸 / WebGL 不可用）时类不加，卡片保持正常白底，
+     页面不会变成"正文糊在壁纸上"。 */
+  .slideout-panel .section.cf-glass.cf-glass-on,
+  .slideout-panel .main .section.cf-glass.cf-glass-on {
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    /* 投影也得在这里改：上面那条 `.slideout-panel .section` 的 box-shadow 同样带
+       !important 且特异性 (0,2,0) 更高，写在 `.cf-glass` 里是压不住的。
+       数值照参考的 DEFAULT_SHADOW：radius 24 / alpha 0.1 / offsetY 4 / 黑。 */
+    box-shadow: 0 4px 24px rgba(0, 0, 0, .10) !important;
+  }
+
+  .cf-glass > canvas.cf-glass__cv {
+    position: absolute;
+    display: block;
+    z-index: -1;              /* 元素底色之上、内容之下 */
+    pointer-events: none;
+  }
+  .cf-glass.cf-side { box-shadow: var(--cf-shadow) !important; }
+  .cf-glass.cf-bar { box-shadow: none !important; }
+
+  /* ---------- 按钮：参考项目里那种玻璃药丸 ----------
+     ★★ 2026-10-07：用户报「讨论区回复等按钮没有轮廓」★★
+
+     根因不是配色，是**玻璃根本接管不了 `<input>`**：
+       Hydro 的按钮有一大半是 `<input type="submit" class="… button">`
+       —— 登录按钮、讨论区的「回复 (Ctrl+Enter)」「取消」都是。
+       它们会被 KINDS 的 `.slideout-panel .button` 选中，mount() 于是往里面
+       insertBefore 一个 canvas（空元素不报错但也不渲染，实测 rect 0x0），
+       同时又加上 `.cf-glass-on` 把 background 摘成 transparent →
+       元素白底没了、画布画不出来，按钮就整个消失了，只剩一颗悬空的字。
+
+     两处一起改：
+       ① glass.js 的 collect() 里 skip 掉空元素（INPUT/SELECT/…）——
+          它们不再被玻璃"假装接管"，保留下面这套基础外观；
+       ② 基础外观自己带上 **1px 可见描边**。原来写的是 border:0 +
+          rgba(255,255,255,.55) 的底 —— 在浅色壁纸上等于什么都没有。
+          白描边同样看不见，所以描边用**深色发丝线** rgba(47,64,86,.20)。
+
+     这套基础外观同时是「页面没有壁纸 → 玻璃整体不启动」时的兜底
+     （例如 /login 的 immersive 布局，body::before 不存在，boot() 12 秒后放弃）。 */
+  .slideout-panel .btn,
+  .slideout-panel button.btn,
+  .slideout-panel input.btn,
+  .slideout-panel .button {
+    border: 1px solid rgba(47, 64, 86, .20) !important;
+    border-radius: 999px !important;
+    background: rgba(255, 255, 255, .62) !important;
+    -webkit-backdrop-filter: blur(16px) saturate(150%);
+    backdrop-filter: blur(16px) saturate(150%);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .10) !important;
+    color: #2f4056 !important;
+  }
+  .slideout-panel .btn:hover,
+  .slideout-panel button.btn:hover,
+  .slideout-panel input.btn:hover,
+  .slideout-panel .button:hover {
+    background: rgba(255, 255, 255, .82) !important;
+    border-color: rgba(11, 87, 201, .45) !important;
+    box-shadow: 0 2px 8px -3px rgba(15, 23, 42, .24) !important;
+  }
+  /* 玻璃接管后（.cf-glass-on 只在画布真的挂上之后才加）：底色和描边都摘掉，
+     形状完全交给 shader，不能再留 CSS 的 1px —— 否则会和折射边叠成双层轮廓。
+     ⚠ 特异性必须 ≥ (0,2,0)，否则压不过上面那条 `.slideout-panel .button`。 */
+  .cf-glass.btn,
+  .cf-glass.button,
+  .slideout-panel .btn.cf-glass.cf-glass-on,
+  .slideout-panel button.btn.cf-glass.cf-glass-on,
+  .slideout-panel input.btn.cf-glass.cf-glass-on,
+  .slideout-panel .button.cf-glass.cf-glass-on {
+    background: transparent !important;
+    border: 0 !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    box-shadow: 0 4px 14px -6px rgba(15, 23, 42, .22) !important;
+  }
+
+  /* ---------- 讨论区的「回复 / 编辑 / 删除」图标按钮 ----------
+     这些是 comments_discussion.html 里 `action` 宏生成的
+       <a href="javascript:;" data-op="reply"><span class="icon icon-reply"></span></a>
+     —— 不是 .btn / .button，所以上面那套管不到它们，在浅色玻璃上就是几个孤零零的
+     图标，没有任何轮廓。给一圈圆角发丝线 + hover 反馈（与第 5 条一致）。 */
+  .slideout-panel .dczcomments__operations a {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 26px; height: 26px; padding: 0 6px;
+    border-radius: 8px;
+    box-shadow: inset 0 0 0 1px rgba(47, 64, 86, .16);
+    transition: background .16s ease, box-shadow .16s ease, color .16s ease;
+  }
+  .slideout-panel .dczcomments__operations a:hover {
+    background: rgba(255, 255, 255, .78);
+    box-shadow: inset 0 0 0 1px rgba(47, 64, 86, .30), 0 1px 4px -1px rgba(15, 23, 42, .20);
+  }
+
+  /* 表单 / 代码 / 表格不玻璃化 —— 半透明底下文字会读不清 */
+  .slideout-panel input,
+  .slideout-panel textarea,
+  .slideout-panel select,
+  .slideout-panel pre,
+  .slideout-panel code,
+  .slideout-panel .code,
+  .slideout-panel .editor,
+  .slideout-panel .data-table,
+  .slideout-panel .table,
+  .slideout-panel .problem-code,
+  .slideout-panel .sample-code {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .slideout-panel pre,
+  .slideout-panel code { background: rgba(255, 255, 255, .85) !important; }
+
+  /* 表格：整块给一个较实的底，单元格透明继承。
+     之前让 td 半透明，文字直接压在花背景上，题库/比赛/评测这些列表页完全没法读 ——
+     密集信息区可读性优先，不参与玻璃。 */
+  .slideout-panel .data-table,
+  .slideout-panel .table {
+    background: rgba(255, 255, 255, .72) !important;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .slideout-panel .data-table td,
+  .slideout-panel .data-table th { background: transparent !important; }
+  .slideout-panel .data-table tr:nth-child(even) td { background: rgba(0, 0, 0, .02) !important; }
+
+  /* ================= 页脚 ================= */
+  .footer__links { display: none !important; }
+  .footer {
+    background: transparent !important;
+    color: inherit !important;
+    padding: 10px 0 14px !important;
+  }
+  .footer > .row, .footer > .row > .columns { padding: 0 !important; margin: 0 !important; }
+  .footer__extra-link { display: block !important; float: none !important; text-align: center; padding: 0 !important; }
+  .footer__extra-left, .footer__extra-right { float: none !important; display: block !important; width: 100% !important; text-align: center; }
+  .footer__extra-left > ol, .footer__extra-right > ol {
+    display: flex !important; flex-wrap: wrap;
+    align-items: center; justify-content: center;
+    gap: 2px 10px; margin: 0; padding: 0; list-style: none;
+  }
+  .footer__extra-right > ol { margin-top: 7px; }
+  .footer__extra-link-item { display: inline-block !important; float: none !important; }
+  .footer__extra-link-item a { color: inherit !important; }
+  .footer__extra-link-item .dropdown-target { text-align: left; }
+
+  /* ---------- 兜底 ----------
+     glass.js 跑不起来时（没有 WebGL / 壁纸读不到 / 图片跨域失败），
+     它会给自己打上 cf-glass-fail 并且**不会**给元素加 .cf-glass，
+     于是上面那套「半透明白 + blur」的 CSS 兜底外观自动生效 —— 页面不会坏。 */
+  html.cf-glass-fail .cf-side { color: #2f4056; }
+
+  /* ---------- 主内容区让位 ---------- */
+  .slideout-panel { margin-left: var(--cf-w); }
+  .slideout-panel > .main { padding: calc(var(--cf-bar-h) + 0.75rem) 0 3rem !important; }
+}
+
+/* ============================================================
+   窄屏（≤ 600px）：只保留「卡片 + 按钮」玻璃，退出布局改造
+   ============================================================
+   本文件上面所有规则都在 @media (min-width: 601px) 里，窄屏一条都不生效；
+   但服务端注入的 <aside class="cf-side"> / <header class="cf-bar"> 是实打实的
+   DOM 节点，于是它们退化成文档流里的普通块：
+     · .cf-side 实测高 4897px、排在正文之后（y=4591）
+       → 这正是用户 2026-10-11 报的「侧栏出现在最下面」
+     · .cf-bar 同理被挤到最底下
+   这里把两者收掉，让 Hydro 自己的移动端布局（汉堡抽屉 + 单栏卡片）接管导航。
+
+   用户随后确认：**手机上也要玻璃 —— 内容加载在玻璃里**。
+   所以下面补一份「卡片 / 按钮」的玻璃规则。
+
+   ★★ 下面这几条是上面 min-width 分支里同名规则的**副本**，改那边记得同步改这里。
+      之所以复制而不共用：那边大量依赖 `:root` 上的 `--cf-glass` / `--cf-filter` /
+      `--cf-shadow`，而这些变量本身就定义在 min-width 分支里 —— 窄屏根本取不到值，
+      搬出去反而要在两个作用域里各维护一份变量表，更容易错。
+
+   ⚠ 别把 `.cf-side` / `.cf-bar` 那两条并进上面的 min-width 分支 —— 会连宽屏一起藏掉。 */
+@media (max-width: 600px) {
+  .cf-side,
+  .cf-bar {
+    display: none !important;
+  }
+
+  /* ---------- 卡片：这是「内容装进玻璃里」的主体 ----------
+     手机屏幕窄，圆角比桌面收一点（16 vs 20），阴影也收一点，
+     免得在单栏布局里显得笨重。 */
+  .slideout-panel .section {
+    background: rgba(255, 255, 255, .50) !important;
+    border: 0 !important;
+    border-radius: 16px !important;
+    box-shadow: 0 10px 30px -20px rgba(15, 23, 42, .30) !important;
+  }
+
+  /* ★★ 全场最关键的一条 ★★
+     不生效的话 canvas 会以 `inline-block` 落在内容**前面**，
+     页面就变成用户报的「一块玻璃 + 一块内容 + 一块玻璃」。
+     画布必须绝对定位、并压在内容之下（z-index:-1）。 */
+  .cf-glass > canvas.cf-glass__cv {
+    position: absolute;
+    display: block;
+    z-index: -1;
+    pointer-events: none;
+  }
+  .cf-glass {
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border: 0 !important;
+    isolation: isolate;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, .10) !important;
+  }
+  /* 玻璃真的挂上之后（.cf-glass-on 由 glass.js 加）才摘掉卡片白底。
+     特异性必须压过上面那条 `.slideout-panel .section`（(0,2,0) 且带 !important），
+     所以要写成 (0,4,0)。 */
+  .slideout-panel .section.cf-glass.cf-glass-on,
+  .slideout-panel .main .section.cf-glass.cf-glass-on {
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, .10) !important;
+  }
+
+  /* ---------- 按钮：和桌面同一套外观（含 <input> 形态，见上面的长注释） ---------- */
+  .slideout-panel .btn,
+  .slideout-panel button.btn,
+  .slideout-panel input.btn,
+  .slideout-panel .button {
+    border: 1px solid rgba(47, 64, 86, .20) !important;
+    border-radius: 999px !important;
+    background: rgba(255, 255, 255, .62) !important;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .10) !important;
+    color: #2f4056 !important;
+  }
+  .slideout-panel .btn:active,
+  .slideout-panel .button:active { background: rgba(255, 255, 255, .82) !important; }
+  .cf-glass.btn,
+  .cf-glass.button,
+  .slideout-panel .btn.cf-glass.cf-glass-on,
+  .slideout-panel button.btn.cf-glass.cf-glass-on,
+  .slideout-panel input.btn.cf-glass.cf-glass-on,
+  .slideout-panel .button.cf-glass.cf-glass-on {
+    background: transparent !important;
+    border: 0 !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    box-shadow: 0 4px 14px -6px rgba(15, 23, 42, .22) !important;
+  }
+}
